@@ -16,7 +16,8 @@ use Ratchet\ConnectionInterface;
 
 class CineSyncServer implements MessageComponentInterface {
     private \SplObjectStorage $clients;
-    private array $rooms = [];   // roomId => [ connId => { conn, userId, userName } ]
+    private array $rooms = [];      // roomId => [ connId => { conn, userId, userName } ]
+    private array $roomState = [];  // roomId => { videoUrl, title, time, paused, lastUpdated }
 
     public function __construct() {
         $this->clients = new \SplObjectStorage();
@@ -43,9 +44,32 @@ class CineSyncServer implements MessageComponentInterface {
                 break;
 
             case 'video_state':
+                // Update server-side room state so future joiners get current position
+                if ($roomId && isset($data['time'])) {
+                    if (!isset($this->roomState[$roomId])) $this->roomState[$roomId] = [];
+                    $this->roomState[$roomId]['time']        = (float)$data['time'];
+                    $this->roomState[$roomId]['paused']      = ($data['action'] === 'pause');
+                    $this->roomState[$roomId]['lastUpdated'] = microtime(true);
+                }
+                $this->broadcastToRoom($roomId, $data, $from);
+                break;
+
             case 'load_video':
+                // Store video URL so late joiners auto-load the same video
+                if ($roomId) {
+                    if (!isset($this->roomState[$roomId])) $this->roomState[$roomId] = [];
+                    $this->roomState[$roomId]['videoUrl']    = $data['url']   ?? '';
+                    $this->roomState[$roomId]['title']       = $data['title'] ?? '';
+                    $this->roomState[$roomId]['time']        = 0.0;
+                    $this->roomState[$roomId]['paused']      = true;
+                    $this->roomState[$roomId]['lastUpdated'] = microtime(true);
+                }
+                $this->broadcastToRoom($roomId, $data, $from);
+                break;
+
             case 'chat':
             case 'reaction':
+            case 'subtitles':
             case 'webrtc_ready':
             case 'webrtc_offer':
             case 'webrtc_answer':
@@ -100,6 +124,35 @@ class CineSyncServer implements MessageComponentInterface {
         ], null);
 
         echo "[CineSync] User '{$userName}' joined room '{$roomId}' ({$count} watching)\n";
+
+        // ── Send room state snapshot directly to the new joiner ──────
+        // Fires immediately — no waiting for the host to notice and respond
+        $state = $this->roomState[$roomId] ?? null;
+        if ($state && !empty($state['videoUrl'])) {
+            // 1. Tell the joiner which video to load
+            $conn->send(json_encode([
+                'type'   => 'load_video',
+                'url'    => $state['videoUrl'],
+                'title'  => $state['title'] ?? '',
+                'userId' => '__server__',
+            ]));
+
+            // 2. Estimate current playback position (account for time elapsed)
+            $estimatedTime = $state['time'] ?? 0.0;
+            if (!($state['paused'] ?? true) && isset($state['lastUpdated'])) {
+                $estimatedTime += microtime(true) - $state['lastUpdated'];
+            }
+
+            // 3. Tell the joiner where to seek + play/pause state
+            $conn->send(json_encode([
+                'type'   => 'video_state',
+                'action' => ($state['paused'] ?? true) ? 'pause' : 'play',
+                'time'   => round($estimatedTime, 2),
+                'userId' => '__server__',
+            ]));
+
+            echo "[CineSync] Sent room snapshot to '{$userName}' (t={$estimatedTime})\n";
+        }
     }
 
     private function broadcastToRoom(string $roomId, array $data, ?ConnectionInterface $skip = null) {
@@ -149,6 +202,7 @@ class CineSyncServer implements MessageComponentInterface {
 
                 if ($count === 0) {
                     unset($this->rooms[$roomId]);
+                    unset($this->roomState[$roomId]);
                     echo "[CineSync] Room '{$roomId}' is now empty and removed.\n";
                 }
             }
@@ -177,7 +231,7 @@ try {
 
 echo "\n";
 echo "╔══════════════════════════════════════════╗\n";
-echo "║         CineSync WebSocket Server        ║\n";
+echo "║      For V — Cinema Together Server     ║\n";
 echo "╠══════════════════════════════════════════╣\n";
 echo "║  Port  →  {$port}                           \n";
 echo "║  Bind  →  0.0.0.0 (Railway-compatible)   ║\n";
