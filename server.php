@@ -1,7 +1,8 @@
 <?php
 /**
  * CineSync — WebSocket Server
- * Run with: php server.php
+ * Deployed on Railway — reads PORT from environment
+ * Local fallback: php server.php (uses 8181)
  * Requires: composer require cboden/ratchet
  */
 
@@ -74,11 +75,13 @@ class CineSyncServer implements MessageComponentInterface {
         $conn->close();
     }
 
-    // ── Helpers ──────────────────────────────────
+    // ── Helpers ──────────────────────────────────────────────────────
+
     private function handleJoin(ConnectionInterface $conn, string $roomId, string $userId, string $userName) {
         if (!isset($this->rooms[$roomId])) {
             $this->rooms[$roomId] = [];
         }
+
         $this->rooms[$roomId][$conn->resourceId] = [
             'conn'     => $conn,
             'userId'   => $userId,
@@ -86,13 +89,17 @@ class CineSyncServer implements MessageComponentInterface {
         ];
 
         $count = count($this->rooms[$roomId]);
+
+        // Broadcast to ALL in room (including self) so viewer count updates everywhere
         $this->broadcastToRoom($roomId, [
             'type'        => 'joined',
             'roomId'      => $roomId,
             'userId'      => $userId,
             'userName'    => $userName,
             'viewerCount' => $count,
-        ], null); // broadcast to ALL including self so viewer count updates
+        ], null);
+
+        echo "[CineSync] User '{$userName}' joined room '{$roomId}' ({$count} watching)\n";
     }
 
     private function broadcastToRoom(string $roomId, array $data, ?ConnectionInterface $skip = null) {
@@ -100,7 +107,11 @@ class CineSyncServer implements MessageComponentInterface {
         $json = json_encode($data);
         foreach ($this->rooms[$roomId] as $peer) {
             if ($skip && $peer['conn'] === $skip) continue;
-            try { $peer['conn']->send($json); } catch (\Exception $e) {}
+            try {
+                $peer['conn']->send($json);
+            } catch (\Exception $e) {
+                echo "[!] Send error: {$e->getMessage()}\n";
+            }
         }
     }
 
@@ -109,7 +120,11 @@ class CineSyncServer implements MessageComponentInterface {
         $json = json_encode($data);
         foreach ($this->rooms[$roomId] as $peer) {
             if ($peer['userId'] === $targetUserId) {
-                try { $peer['conn']->send($json); } catch (\Exception $e) {}
+                try {
+                    $peer['conn']->send($json);
+                } catch (\Exception $e) {
+                    echo "[!] Send error: {$e->getMessage()}\n";
+                }
                 break;
             }
         }
@@ -130,42 +145,29 @@ class CineSyncServer implements MessageComponentInterface {
                     'viewerCount' => $count,
                 ]);
 
+                echo "[CineSync] User '{$info['userName']}' left room '{$roomId}' ({$count} watching)\n";
+
                 if ($count === 0) {
                     unset($this->rooms[$roomId]);
+                    echo "[CineSync] Room '{$roomId}' is now empty and removed.\n";
                 }
             }
         }
     }
 }
 
-// ── Port selection with auto-fallback ────────────────────────────────
-// XAMPP uses 8080 for Tomcat. We try several ports automatically.
-$requestedPort = (int)($argv[1] ?? 0);
-$candidates    = $requestedPort > 0
-    ? [$requestedPort]
-    : [8181, 8282, 8383, 7777, 9090];
+// ── Port Configuration ────────────────────────────────────────────────────────
+// Railway injects a dynamic PORT environment variable.
+// Locally (XAMPP / CLI) it falls back to 8181.
+$port = (int)(getenv('PORT') ?: ($argv[1] ?? 8181));
 
-$port   = null;
-$server = null;
-
-foreach ($candidates as $try) {
-    if (!portInUse($try)) {
-        $port = $try;
-        break;
-    }
-    echo "[CineSync] Port {$try} is busy, trying next...\n";
-}
-
-if ($port === null) {
-    echo "[CineSync] ERROR: All candidate ports are in use.\n";
-    echo "           Run:  php server.php <free-port>  (e.g. php server.php 8484)\n";
-    exit(1);
-}
+echo "[CineSync] Binding to 0.0.0.0:{$port}\n";
 
 try {
     $server = IoServer::factory(
         new HttpServer(new WsServer(new CineSyncServer())),
-        $port
+        $port,
+        '0.0.0.0'   // Must be 0.0.0.0 so Railway's proxy can reach it
     );
 } catch (\RuntimeException $e) {
     echo "[CineSync] ERROR: Could not bind to port {$port}: {$e->getMessage()}\n";
@@ -173,25 +175,15 @@ try {
     exit(1);
 }
 
-// ── Write chosen port to a file so the frontend JS can read it ───────
-file_put_contents(__DIR__ . '/ws_port.txt', $port);
-
 echo "\n";
 echo "╔══════════════════════════════════════════╗\n";
 echo "║         CineSync WebSocket Server        ║\n";
 echo "╠══════════════════════════════════════════╣\n";
-echo "║  WS  →  ws://localhost:{$port}              \n";
+echo "║  Port  →  {$port}                           \n";
+echo "║  Bind  →  0.0.0.0 (Railway-compatible)   ║\n";
 echo "║                                          ║\n";
-echo "║  Frontend:  http://localhost             ║\n";
-echo "║  (open in browser while XAMPP is on)     ║\n";
+echo "║  Local WS  →  ws://localhost:{$port}        \n";
 echo "╚══════════════════════════════════════════╝\n\n";
 echo "[CineSync] Press Ctrl+C to stop.\n\n";
 
 $server->run();
-
-// ── Helper ───────────────────────────────────────────────────────────
-function portInUse(int $port): bool {
-    $sock = @fsockopen('127.0.0.1', $port, $errno, $errstr, 0.5);
-    if ($sock) { fclose($sock); return true; }
-    return false;
-}
