@@ -1,18 +1,28 @@
+# Use PHP CLI
 FROM php:8.2-cli
 
-# Install PHP sockets extension
-RUN docker-php-ext-install sockets
+# Install required extensions and git/unzip
+RUN apt-get update && apt-get install -y \
+    git \
+    unzip \
+    zip \
+    && docker-php-ext-install sockets \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set working directory
+WORKDIR /app
 
 # Copy project files
 COPY . /app
-WORKDIR /app
 
-# Install composer dependencies
+# Install composer
 RUN curl -sS https://getcomposer.org/installer | php
-RUN php composer.phar install
 
-# Expose the port your WebSocket server uses
+# Install PHP dependencies
+RUN php composer.phar install --no-interaction --prefer-dist
+
+# Expose your WebSocket port
 EXPOSE 8181
 
-# Start your server
+# Run the WebSocket server
 CMD ["php", "server.php"]
