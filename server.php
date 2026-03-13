@@ -73,6 +73,7 @@ class CineSyncServer implements MessageComponentInterface {
             case 'webrtc_answer':
             case 'webrtc_ice':
             case 'movie_stream_request':
+            case 'movie_stream_offset':
                 $targetId = $data['targetId'] ?? '';
                 if ($targetId) {
                     $this->sendToUser($roomId, $targetId, $data);
