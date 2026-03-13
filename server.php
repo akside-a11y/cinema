@@ -90,6 +90,7 @@ class CineSyncServer implements MessageComponentInterface {
             case 'webrtc_leave':
             case 'movie_stream_ready':
             case 'movie_stream_stop':
+            case 'subtitle_toggle':
                 $this->broadcastToRoom($roomId, $data, $from);
                 break;
 
