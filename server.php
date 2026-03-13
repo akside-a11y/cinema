@@ -1,6 +1,6 @@
 <?php
 /**
- * CineSync — WebSocket Server
+ * For V (Cinema) — WebSocket Server
  * Deployed on Railway — reads PORT from environment
  * Local fallback: php server.php (uses 8181)
  * Requires: composer require cboden/ratchet
@@ -67,16 +67,29 @@ class CineSyncServer implements MessageComponentInterface {
                 $this->broadcastToRoom($roomId, $data, $from);
                 break;
 
+            // ── Targeted WebRTC signaling (routed to a specific peer) ──
+            // These carry a targetId — send only to that user, not broadcast
+            case 'webrtc_offer':
+            case 'webrtc_answer':
+            case 'webrtc_ice':
+            case 'movie_stream_request':
+                $targetId = $data['targetId'] ?? '';
+                if ($targetId) {
+                    $this->sendToUser($roomId, $targetId, $data);
+                } else {
+                    // No target — broadcast to room (fallback)
+                    $this->broadcastToRoom($roomId, $data, $from);
+                }
+                break;
+
+            // ── Broadcast-to-room messages ──
             case 'chat':
             case 'reaction':
             case 'subtitles':
             case 'webrtc_ready':
-            case 'webrtc_offer':
-            case 'webrtc_answer':
-            case 'webrtc_ice':
+            case 'webrtc_leave':
             case 'movie_stream_ready':
             case 'movie_stream_stop':
-            case 'webrtc_leave':
                 $this->broadcastToRoom($roomId, $data, $from);
                 break;
 
@@ -127,11 +140,28 @@ class CineSyncServer implements MessageComponentInterface {
 
         echo "[CineSync] User '{$userName}' joined room '{$roomId}' ({$count} watching)\n";
 
+        // ── Send existing peers list to new joiner so they can initiate WebRTC ──
+        // This lets the new joiner know who's already in the room
+        $existingPeers = [];
+        foreach ($this->rooms[$roomId] as $connId => $peer) {
+            if ($peer['userId'] !== $userId) {
+                $existingPeers[] = [
+                    'userId'   => $peer['userId'],
+                    'userName' => $peer['userName'],
+                ];
+            }
+        }
+        if (!empty($existingPeers)) {
+            $conn->send(json_encode([
+                'type'  => 'room_peers',
+                'peers' => $existingPeers,
+            ]));
+        }
+
         // ── Send room state snapshot directly to the new joiner ──────
-        // Fires immediately — no waiting for the host to notice and respond
         $state = $this->roomState[$roomId] ?? null;
         if ($state && !empty($state['videoUrl'])) {
-            // 1. Tell the joiner which video to load
+            // Tell the joiner which video to load
             $conn->send(json_encode([
                 'type'   => 'load_video',
                 'url'    => $state['videoUrl'],
@@ -139,13 +169,13 @@ class CineSyncServer implements MessageComponentInterface {
                 'userId' => '__server__',
             ]));
 
-            // 2. Estimate current playback position (account for time elapsed)
+            // Estimate current playback position
             $estimatedTime = $state['time'] ?? 0.0;
             if (!($state['paused'] ?? true) && isset($state['lastUpdated'])) {
                 $estimatedTime += microtime(true) - $state['lastUpdated'];
             }
 
-            // 3. Tell the joiner where to seek + play/pause state
+            // Tell the joiner where to seek + play/pause state
             $conn->send(json_encode([
                 'type'   => 'video_state',
                 'action' => ($state['paused'] ?? true) ? 'pause' : 'play',
@@ -213,8 +243,6 @@ class CineSyncServer implements MessageComponentInterface {
 }
 
 // ── Port Configuration ────────────────────────────────────────────────────────
-// Railway injects a dynamic PORT environment variable.
-// Locally (XAMPP / CLI) it falls back to 8181.
 $port = (int)(getenv('PORT') ?: ($argv[1] ?? 8181));
 
 echo "[CineSync] Binding to 0.0.0.0:{$port}\n";
@@ -223,7 +251,7 @@ try {
     $server = IoServer::factory(
         new HttpServer(new WsServer(new CineSyncServer())),
         $port,
-        '0.0.0.0'   // Must be 0.0.0.0 so Railway's proxy can reach it
+        '0.0.0.0'
     );
 } catch (\RuntimeException $e) {
     echo "[CineSync] ERROR: Could not bind to port {$port}: {$e->getMessage()}\n";
